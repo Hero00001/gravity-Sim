@@ -1,0 +1,41 @@
+# --- Build output ---
+build/
+out/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+Makefile
+*.cmake.user
+
+# Visual Studio generated projects (CMake regenerates these)
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+*.filters
+
+# --- Compiled artifacts (generated ones live under build/, which is ignored) ---
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+
+# --- IDE / editor metadata ---
+.vs/
+*.user
+*.swp
+*.swo
+
+# --- OS / misc ---
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.log
+*.tmp
+*.cache
