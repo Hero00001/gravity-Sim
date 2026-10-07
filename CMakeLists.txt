@@ -56,9 +56,10 @@ endif()
 
 # Creates an executable with the vendored GLFW/GLEW/GLM and copies the
 # runtime DLLs (glfw3.dll, glew32.dll) next to the produced .exe.
-function(gravity_target name source)
-  add_executable(${name} ${source})
+function(gravity_target name)
+  add_executable(${name} ${ARGN})
   target_include_directories(${name} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${GLM_INCLUDE_DIR}
     ${GLEW_INCLUDE_DIR}
     ${GLFW_INCLUDE_DIR})
@@ -76,3 +77,10 @@ endfunction()
 gravity_target(gravity_sim        gravity_sim.cpp)
 gravity_target(gravity_sim_3Dgrid gravity_sim_3Dgrid.cpp)
 gravity_target(3D_test            3D_test.cpp)
+
+gravity_target(gravity_sim_v2
+  src/app/main.cpp
+  src/render/renderer.cpp
+  src/render/mesh.cpp)
+
+enable_testing()

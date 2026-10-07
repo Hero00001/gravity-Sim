@@ -39,3 +39,6 @@ Desktop.ini
 *.log
 *.tmp
 *.cache
+
+# --- SDD workspace (skill scratch) ---
+.superpowers/
