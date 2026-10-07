@@ -13,6 +13,8 @@ struct WorldConfig {
     double maxFrameDelta   = 0.25;   // s
 };
 
+double pairSoftening(const Body& a, const Body& b, const WorldConfig& cfg);
+
 class World {
 public:
     static constexpr double SIM_DT = 1.0 / 480.0;

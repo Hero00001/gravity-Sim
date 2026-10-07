@@ -1,5 +1,6 @@
 #include "physics/world.hpp"
 #include "physics/constants.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -81,10 +82,34 @@ static void test_paused_bit_identical() {
     CHECK(w.simTime == 0.0);
 }
 
+static void test_softening_no_nan_at_contact() {
+    World w;
+    Body a; a.mass = 1e24; a.position = {0, 0, 0};
+    Body b; b.mass = 1e24; b.position = {1e-6, 0, 0};   // essentially touching
+    w.spawn(a); w.spawn(b);
+    const auto acc = w.computeAccelerations();
+    CHECK(std::isfinite(acc[0].x) && std::isfinite(acc[0].y) && std::isfinite(acc[0].z));
+    CHECK(std::isfinite(acc[1].x) && std::isfinite(acc[1].y) && std::isfinite(acc[1].z));
+    CHECK(glm::length(acc[0]) < 1.0e7);                  // bounded: G*m/eps^2 ≈ 2.7e4
+}
+
+static void test_pair_softening_formula() {
+    gs::Body a; a.mass = 1e24;                    // rocky radius ≈ 3.7e5 m
+    gs::Body b; b.mass = 1e24;
+    gs::WorldConfig cfg;
+    const double eps = gs::pairSoftening(a, b, cfg);
+    CHECK_NEAR(eps, std::max(0.1 * (a.radius() + b.radius()), 5.0e4), 1.0);
+    gs::Body tiny; tiny.mass = 1.0; tiny.density = 5515.0;
+    gs::Body huge; huge.mass = 1e20; huge.density = 1408.0;
+    CHECK_NEAR(gs::pairSoftening(tiny, huge, cfg), 5.0e4, 1.0);   // floor wins
+}
+
 int main() {
     test_fps_independence();
     test_step_cap_and_clamp();
     test_paused_bit_identical();
+    test_softening_no_nan_at_contact();
+    test_pair_softening_formula();
     if (g_failures) { std::printf("%d failure(s)\n", g_failures); return 1; }
     std::printf("all physics tests passed\n");
     return 0;

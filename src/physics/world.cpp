@@ -1,8 +1,13 @@
 #include "physics/world.hpp"
 #include "physics/constants.hpp"
+#include <algorithm>
 #include <cmath>
 
 namespace gs {
+
+double pairSoftening(const Body& a, const Body& b, const WorldConfig& cfg) {
+    return std::max(cfg.softeningFrac * (a.radius() + b.radius()), cfg.softeningFloor);
+}
 
 std::uint64_t World::spawn(const Body& b) {
     Body copy = b;
@@ -27,7 +32,9 @@ std::vector<glm::dvec3> World::computeAccelerations() const {
             if (i == j || bodies[j].ghost) continue;
             const glm::dvec3 d = bodies[j].position - bodies[i].position;
             const double r2 = glm::dot(d, d);
-            const double denom = r2 * std::sqrt(r2);   // r^3 — softened in Task 4
+            const double eps = pairSoftening(bodies[i], bodies[j], config);
+            const double u2 = r2 + eps * eps;
+            const double denom = u2 * std::sqrt(u2);          // (r^2+eps^2)^1.5
             if (denom > 0.0) acc[i] += G * bodies[j].mass * d / denom;
         }
     }
