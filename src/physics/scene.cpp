@@ -1,6 +1,7 @@
 #include "physics/scene.hpp"
 #include "physics/world.hpp"
 #include "physics/constants.hpp"
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <sstream>
@@ -183,6 +184,7 @@ bool saveScene(const Scene& s, const std::string& path) {
     const char* mode = s.grid.mode == SceneGridMode::Flat ? "flat"
                      : s.grid.mode == SceneGridMode::Off  ? "off" : "bend";
     out << "grid " << mode << " " << s.grid.sizeUnits << " " << s.grid.divisions << "\n";
+    out << "refradius " << s.refRadiusUnits << "\n";
     for (const auto& b : s.bodies) {
         out << "body "
             << b.position.x << " " << b.position.y << " " << b.position.z << " "
@@ -216,6 +218,8 @@ Scene loadScene(const std::string& path) {
                         : m == "off"  ? SceneGridMode::Off : SceneGridMode::Bend;
             s.grid.sizeUnits = sz; s.grid.divisions = dv;
             haveGrid = true;
+        } else if (tok == "refradius") {
+            if (!(ss >> s.refRadiusUnits)) throw std::runtime_error("bad refradius line");
         } else if (tok == "body") {
             Body b; double r = 0;
             if (!(ss >> b.position.x >> b.position.y >> b.position.z
@@ -248,6 +252,10 @@ Scene snapshotFromWorld(const World& w, const std::string& name,
 void applySceneToWorld(World& w, const Scene& s) {
     w.reset();
     w.timeScale = s.timeScale;
+    // Real bodies are microscopic next to an astronomical scene (Earth is ~0.6 units
+    // across a 450,000-unit solar system), so raise the visual floor to a fraction of
+    // the scene's framed radius — otherwise every preset renders as an empty grid.
+    w.minVisualRadiusMeters = std::max(3.0e6, s.refRadiusUnits * UNIT * 0.015);
     for (const auto& b : s.bodies) {
         Body c = b;
         c.ghost = false; c.grabbed = false; c.trail.clear();

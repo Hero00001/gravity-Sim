@@ -84,12 +84,24 @@ int World::advance(double frameDeltaSeconds) {
     if (fd > config.maxFrameDelta) fd = config.maxFrameDelta;
     if (fd < 0.0) fd = 0.0;
 
-    const double ts = paused ? 0.0 : timeScale;
-    accum_ += fd * ts;
+    if (paused) return 0;                    // no stepping, merging, or trail sampling
+
+    // Time warp without a step-count explosion. The sub-step *size* scales with the
+    // requested time scale, so the number of steps per frame stays ~fd/SIM_DT (<= the
+    // 8-step cap) no matter how fast the sim is asked to run:
+    //     sim-seconds advanced per real second = steps * dt / fd
+    //                                          = (fd/SIM_DT) * (SIM_DT*timeScale) / fd
+    //                                          = timeScale.   (correct fast-forward)
+    // Previously the accumulator added fd*timeScale while always stepping a fixed
+    // SIM_DT, so at timeScale >= ~1 the 8-step cap was hit every frame and the backlog
+    // was discarded — capping the sim at real-time speed and freezing every preset
+    // (Solar System runs at 1e6x but looked static).
+    const double dt = SIM_DT * timeScale;
+    accum_ += fd;
 
     int n = 0;
     while (accum_ >= SIM_DT && n < config.maxStepsPerFrame) {
-        step(SIM_DT);
+        step(dt);
         accum_ -= SIM_DT;
         ++n;
     }

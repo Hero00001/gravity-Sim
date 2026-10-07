@@ -1,5 +1,6 @@
 #include "render/hud.hpp"
 #include <GL/glew.h>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -34,8 +35,10 @@ const char* kHudVS = R"glsl(
 #version 330 core
 layout(location=0) in vec2 aPos;
 uniform vec2 uRes;
+uniform float uScale;      // font pixels -> screen pixels (legibility / HiDPI)
 void main(){
-  vec2 ndc = vec2(aPos.x / uRes.x * 2.0 - 1.0, 1.0 - aPos.y / uRes.y * 2.0);
+  vec2 p = aPos * uScale;
+  vec2 ndc = vec2(p.x / uRes.x * 2.0 - 1.0, 1.0 - p.y / uRes.y * 2.0);
   gl_Position = vec4(ndc, 0.0, 1.0);
 })glsl";
 const char* kHudFS = R"glsl(
@@ -48,22 +51,43 @@ void main(){ frag = uColor; })glsl";
 bool Hud::init() {
     prog_ = link(kHudVS, kHudFS);
     if (!prog_) return false;
+    uResLoc_   = glGetUniformLocation(prog_, "uRes");
+    uColorLoc_ = glGetUniformLocation(prog_, "uColor");
+    uScaleLoc_ = glGetUniformLocation(prog_, "uScale");
+
+    buf_.resize(40000);                          // floats; 4 per vertex -> 10k vertices
+    const int maxQuads = int(buf_.size() / 4 / 4);   // floats / (floats/vertex) / (verts/quad)
+    indices_.resize(std::size_t(maxQuads) * 6);
+    for (int q = 0; q < maxQuads; ++q) {
+        const unsigned b = unsigned(q) * 4;
+        indices_[std::size_t(q) * 6 + 0] = b + 0;
+        indices_[std::size_t(q) * 6 + 1] = b + 1;
+        indices_[std::size_t(q) * 6 + 2] = b + 2;
+        indices_[std::size_t(q) * 6 + 3] = b + 0;
+        indices_[std::size_t(q) * 6 + 4] = b + 2;
+        indices_[std::size_t(q) * 6 + 5] = b + 3;
+    }
+
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &vbo_);
+    glGenBuffers(1, &ebo_);
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    glBufferData(GL_ARRAY_BUFFER, 40000 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(buf_.size() * sizeof(float)), nullptr, GL_DYNAMIC_DRAW);
     // stb_easy_font emits 4 floats per vertex (x, y, z=0, color); we use x,y only.
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, GLsizeiptr(indices_.size() * sizeof(unsigned)),
+                 indices_.data(), GL_STATIC_DRAW);
     glBindVertexArray(0);
-    buf_.resize(40000);
     return true;
 }
 
 void Hud::shutdown() {
     glDeleteVertexArrays(1, &vao_);
     glDeleteBuffers(1, &vbo_);
+    glDeleteBuffers(1, &ebo_);
     if (prog_) glDeleteProgram(prog_);
     prog_ = 0;
 }
@@ -71,9 +95,17 @@ void Hud::shutdown() {
 void Hud::draw(const HudData& d) {
     if (!d.hudVisible) return;
 
+    // Keep text legible on small windows and on HiDPI framebuffers (where the
+    // framebuffer is bigger than the window in pixels). 2x minimum.
+    const float scale = std::max(2.0f, float(d.fbh) / 600.0f);
+    const float W = float(d.fbw) / scale;    // usable width, in font pixels
+    const float H = float(d.fbh) / scale;    // usable height, in font pixels
+    const float LH = 16.0f;                  // line height (glyphs are ~12 tall)
+
     glUseProgram(prog_);
-    glUniform2f(glGetUniformLocation(prog_, "uRes"), float(d.fbw), float(d.fbh));
-    glUniform4f(glGetUniformLocation(prog_, "uColor"), 0.75f, 1.0f, 0.9f, 1.0f);
+    glUniform2f(uResLoc_, float(d.fbw), float(d.fbh));
+    glUniform1f(uScaleLoc_, scale);
+    glUniform4f(uColorLoc_, 0.75f, 1.0f, 0.9f, 1.0f);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -81,17 +113,18 @@ void Hud::draw(const HudData& d) {
     int vcount = 0;  // vertex count (each vertex = 4 floats: x,y,z,packed-color)
     auto text = [&](float x, float y, const char* s) {
         const std::size_t used_floats = (std::size_t)vcount * 4;
+        if (used_floats >= buf_.size()) return;
         const int avail_bytes = (int)((buf_.size() - used_floats) * sizeof(float));
-        if (avail_bytes <= 0) return;
-        // stb_easy_font_print returns the number of quads; each quad = 4 vertices.
+        // stb_easy_font_print returns the number of QUADS; each quad = 4 vertices.
         const int quads = stb_easy_font_print(x, y, (char*)s, nullptr,
                                               buf_.data() + used_floats, avail_bytes);
         vcount += quads * 4;
     };
 
     char line[160];
+    float y = 8.0f;
     std::snprintf(line, sizeof(line), "FPS %.0f", d.fps);
-    text(10.0f, 10.0f, line);
+    text(8.0f, y, line); y += LH;
 
     char tbuf[40];
     const double t = d.simTime;
@@ -100,36 +133,41 @@ void Hud::draw(const HudData& d) {
     else if (t < 31557600.0)   std::snprintf(tbuf, sizeof(tbuf), "T+%.2f d", t / 86400.0);
     else                       std::snprintf(tbuf, sizeof(tbuf), "T+%.2f y", t / 31557600.0);
     std::snprintf(line, sizeof(line), "%s   x%.2g", tbuf, d.timeScale);
-    text(10.0f, 30.0f, line);
-
-    if (d.paused) text(10.0f, 50.0f, "[PAUSED]");
+    text(8.0f, y, line); y += LH;
 
     std::snprintf(line, sizeof(line), "bodies %d   scene %s", d.bodyCount, d.sceneName.c_str());
-    text(10.0f, d.paused ? 70.0f : 50.0f, line);
+    text(8.0f, y, line); y += LH;
+
+    if (d.paused) { text(8.0f, y, "[PAUSED]"); y += LH; }
 
     if (d.hasSelection) {
-        const float x = float(d.fbw) - 280.0f;
+        const float x = W - 190.0f;
+        float sy = 8.0f;
         std::snprintf(line, sizeof(line), "body #%llu", (unsigned long long)d.selId);
-        text(x, 10.0f, line);
+        text(x, sy, line); sy += LH;
         std::snprintf(line, sizeof(line), "mass %.3g kg", d.selMass);
-        text(x, 30.0f, line);
+        text(x, sy, line); sy += LH;
         std::snprintf(line, sizeof(line), "speed %.3g km/s", d.selSpeed);
-        text(x, 50.0f, line);
+        text(x, sy, line); sy += LH;
         std::snprintf(line, sizeof(line), "dist %.3g km", d.selDist);
-        text(x, 70.0f, line);
+        text(x, sy, line); sy += LH;
     }
 
     if (d.placing) {
         std::snprintf(line, sizeof(line), "placing mass %.3g kg", d.placeMass);
-        text(10.0f, float(d.fbh) - 50.0f, line);
-        text(10.0f, float(d.fbh) - 30.0f, "wheel=depth  RMB=grow  release=drop  arrows=move");
+        text(8.0f, H - 2.0f * LH, line);
+        text(8.0f, H - LH, "wheel=depth  RMB=grow  release=drop  arrows=move");
     }
 
-    glBindVertexArray(vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    glBufferData(GL_ARRAY_BUFFER, vcount * 4 * sizeof(float), buf_.data(), GL_DYNAMIC_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, vcount);
-    glBindVertexArray(0);
+    const int quads = std::min(vcount / 4, int(indices_.size() / 6));
+    if (quads > 0) {
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(std::size_t(vcount) * 4 * sizeof(float)),
+                     buf_.data(), GL_DYNAMIC_DRAW);
+        glDrawElements(GL_TRIANGLES, quads * 6, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+    }
     glEnable(GL_DEPTH_TEST);
 }
 

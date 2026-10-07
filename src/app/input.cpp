@@ -85,9 +85,14 @@ void Input::startPlacing() {
     b.color = {0.9f, 0.4f, 0.2f, 1.0f};
     b.ghost = true;
     b.trail.setCap(kTrailCaps[trailCapIdx_]);
-    const double d0 = std::clamp(double(glm::length(cam_->pos)), 100.0, 50000.0);
-    const glm::dvec3 spawnPos = glm::dvec3(cam_->pos) + glm::dvec3(cam_->front()) * d0 * gs::UNIT;
-    b.position = spawnPos;
+    // Spawn ~20% of the way from the camera toward its focus, IN FRONT of the camera.
+    // Work in world-units, then convert to metres once. (The old code added the camera
+    // position in *units* to an offset in *metres*, so the body landed ~d0 units from
+    // the ORIGIN — nowhere near the camera — and appeared as "nothing happened".)
+    const float viewDist = std::max(glm::length(cam_->pos), 100.0f);   // units
+    const float d0 = viewDist * 0.2f;                                  // units
+    const glm::vec3 spawnUnits = cam_->pos + cam_->front() * d0;
+    b.position = glm::dvec3(spawnUnits) * double(gs::UNIT);
     placingId_ = world_->spawn(b);
     mode_ = Mode::Placing;
 }
@@ -117,7 +122,7 @@ std::uint64_t Input::pickBody(float px, float py) {
         const float sy = (1.0f - (ndc.y * 0.5f + 0.5f)) * float(fbh_);
         const float dx = sx - px, dy = sy - py;
         const float d = std::sqrt(dx * dx + dy * dy);
-        const float dispU = float(std::max(b.radius(), 3.0e6) / gs::UNIT);
+        const float dispU = float(world_->displayRadius(b) / gs::UNIT);
         const glm::vec3 edge = cam_->projectToNDC(u + cam_->right() * dispU, aspect);
         float thr = 20.0f;
         if (edge.z > -1.0f && edge.z < 1.0f) {

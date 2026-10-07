@@ -26,8 +26,11 @@ struct HudData {
     double placeMass = 0.0;    // kg
 };
 
-// Custom-rendered text overlay (no ImGui). Uses stb_easy_font baked to a single
-// GL_TRIANGLES buffer; drawn last with depth test off and blending on.
+// Custom-rendered text overlay (no ImGui). Uses stb_easy_font, whose output is a
+// list of QUADS (4 vertices each). We expand those to triangles with a static
+// index buffer (6 indices/quad) and draw with glDrawElements(GL_TRIANGLES,...) —
+// drawing the raw 4-vertex quads as GL_TRIANGLES garbles the glyphs. Drawn last
+// with depth test off and blending on.
 class Hud {
 public:
     bool init();
@@ -35,8 +38,10 @@ public:
     void draw(const HudData& d);
 private:
     unsigned prog_ = 0;
-    unsigned vao_ = 0, vbo_ = 0;
-    std::vector<float> buf_;
+    unsigned vao_ = 0, vbo_ = 0, ebo_ = 0;
+    int uResLoc_ = -1, uColorLoc_ = -1, uScaleLoc_ = -1;
+    std::vector<float> buf_;            // stb_easy_font vertex output (x,y,z,color)
+    std::vector<unsigned> indices_;     // quad -> two triangles
 };
 
 } // namespace gs::render

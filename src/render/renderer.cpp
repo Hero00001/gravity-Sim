@@ -186,11 +186,11 @@ void Renderer::syncBodies(const gs::World& world) {
         else { glDeleteVertexArrays(1, &it->second.vao);
                glDeleteBuffers(1, &it->second.vbo); it = gpu_.erase(it); }
     }
-    // create / refresh
+    // create / refresh (display radius = max(physical, world visual floor))
     for (const auto& b : world.bodies) {
         auto it = gpu_.find(b.id);
+        const double disp = world.displayRadius(b);
         if (it == gpu_.end()) {
-            const double disp = std::max(b.radius(), 3.0e6);      // MIN_VISUAL (spec §4.5)
             const auto verts = sphereVertices(disp / UNIT);
             GpuBody g;
             glGenVertexArrays(1, &g.vao);
@@ -201,17 +201,16 @@ void Renderer::syncBodies(const gs::World& world) {
                          GL_STATIC_DRAW);
             glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
             glEnableVertexAttribArray(0);
-            g.radius = b.radius();
+            g.radius = disp;
             g.count = int(verts.size() / 3);
             gpu_.emplace(b.id, g);
-        } else if (std::fabs(b.radius() - it->second.radius) >
+        } else if (std::fabs(disp - it->second.radius) >
                    0.005 * std::max(it->second.radius, 1.0)) {
-            const double disp = std::max(b.radius(), 3.0e6);
             const auto verts = sphereVertices(disp / UNIT);
             glBindBuffer(GL_ARRAY_BUFFER, it->second.vbo);
             glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(),
                          GL_STATIC_DRAW);
-            it->second.radius = b.radius();
+            it->second.radius = disp;
             it->second.count = int(verts.size() / 3);
         }
     }
@@ -292,7 +291,7 @@ void Renderer::drawSelection(const gs::World& world, const Camera& cam, float as
     for (const auto& b : world.bodies) if (b.id == id) { sel = &b; break; }
     if (!sel) return;
     const glm::vec3 c = glm::vec3(sel->position) / float(gs::UNIT);
-    const float disp = float(std::max(sel->radius(), 3.0e6) / gs::UNIT);
+    const float disp = float(world.displayRadius(*sel) / gs::UNIT);
     const float ringR = disp * 1.6f + 2.0f;
     const glm::vec3 r = cam.right();
     const glm::vec3 u = cam.up();

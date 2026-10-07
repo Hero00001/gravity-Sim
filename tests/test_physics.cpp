@@ -296,6 +296,7 @@ static void test_scene_roundtrip() {
     CHECK(s2.grid.mode == s.grid.mode);
     CHECK_NEAR(s2.grid.sizeUnits, s.grid.sizeUnits, 0.0);
     CHECK(s2.grid.divisions == s.grid.divisions);
+    CHECK_NEAR(s2.refRadiusUnits, s.refRadiusUnits, 0.0);   // framing survives round-trip
     CHECK_NEAR(s2.bodies[0].position.x, s.bodies[0].position.x, 1e-6);
     CHECK_NEAR(s2.bodies[0].mass, s.bodies[0].mass, s.bodies[0].mass * 1e-12);
 
@@ -330,6 +331,51 @@ static double bh_maxrel_for(const std::vector<gs::Body>& bodies, double eps) {
         if (rel > maxRel) { maxRel = rel; worst = i; }
     }
     return maxRel;
+}
+
+static void test_time_scale_fast_forward() {
+    // Regression: timeScale must actually fast-forward. The old accumulator added
+    // fd*timeScale but always stepped a fixed SIM_DT, so the 8-step cap was hit every
+    // frame and the backlog was discarded — capping the sim at real-time speed and
+    // making every preset (timeScale 1e4..1e6) look frozen.
+    {
+        World w; w.spawn(Body{}); w.spawn(Body{});
+        w.timeScale = 1e6;
+        for (int i = 0; i < 60; ++i) w.advance(1.0 / 60.0);   // 1 real second
+        CHECK_NEAR(w.simTime, 1.0e6, 1.0);                    // 1e6 sim-seconds elapsed
+    }
+    {
+        World w; w.spawn(Body{}); w.spawn(Body{});
+        w.timeScale = 1.0;
+        for (int i = 0; i < 60; ++i) w.advance(1.0 / 60.0);
+        CHECK_NEAR(w.simTime, 1.0, 0.02);                     // realtime is 1:1
+    }
+    // The bodies must actually move at high timeScale (not just the clock).
+    {
+        World w;
+        Body a; a.mass = 1.0e30; a.position = {0, 0, 0};
+        Body b; b.mass = 1.0e30; b.position = {1.0e11, 0, 0};
+        w.spawn(a); w.spawn(b);
+        w.timeScale = 1e6;
+        const glm::dvec3 v0 = w.bodies[1].velocity;
+        for (int i = 0; i < 60; ++i) w.advance(1.0 / 60.0);
+        CHECK(glm::length(w.bodies[1].velocity - v0) > 1.0);  // gravity acted
+        CHECK(glm::length(w.bodies[1].position - b.position) > 1.0e7);  // and it moved
+    }
+}
+
+static void test_scene_visual_floor() {
+    // Bodies are microscopic vs. astronomical scenes, so loading a scene must raise the
+    // visual floor (otherwise every preset renders as an empty grid).
+    gs::World w;
+    gs::applySceneToWorld(w, gs::makeSolarSystem());
+    CHECK(w.minVisualRadiusMeters > 1.0e9);                    // well above the 3e6 default
+    for (const auto& b : w.bodies)
+        CHECK(w.displayRadius(b) >= w.minVisualRadiusMeters);
+    // A small rock still displays at the (large) floor, but its physical radius is intact.
+    gs::Body rock; rock.mass = 1e22; rock.density = 3344.0;
+    CHECK(rock.radius() < w.minVisualRadiusMeters);              // genuinely below the floor
+    CHECK_NEAR(w.displayRadius(rock), w.minVisualRadiusMeters, 0.0);
 }
 
 static void test_barnes_hut_matches_direct() {
@@ -388,6 +434,8 @@ int main() {
     test_radius_constant_through_lifecycle();
     test_presets_sanity();
     test_scene_roundtrip();
+    test_time_scale_fast_forward();
+    test_scene_visual_floor();
     test_barnes_hut_matches_direct();
     if (g_failures) { std::printf("%d failure(s)\n", g_failures); return 1; }
     std::printf("all physics tests passed\n");

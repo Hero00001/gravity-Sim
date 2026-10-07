@@ -89,7 +89,9 @@ The app launches straight into the **Solar System** preset and is already runnin
 
 Every body has a mass, a density, and a derived radius from r = (3m / 4πρ)^(1/3), so its on-screen size scales the way a real sphere of rock or gas would. State is stored in SI units as `double`: positions in metres, masses in kilograms, with `UNIT = 1e7` m/unit for the render mapping.
 
-The simulation advances with a fixed internal timestep (`SIM_DT = 1/480 s`) and a leapfrog kick-drift-kick (KDK) integrator, so it is **frame-rate independent** — 60 fps and 480 fps stepping produce the same trajectory (CTest #1). Each frame's real elapsed time is clamped to 0.25 s and split into at most 8 fixed sub-steps, with any remainder carried into the next frame.
+The simulation advances with a fixed internal timestep (`SIM_DT = 1/480 s`) and a leapfrog kick-drift-kick (KDK) integrator, so it is **frame-rate independent** — 60 fps and 480 fps stepping produce the same trajectory (CTest #1). Each frame's real elapsed time is clamped to 0.25 s. The time-scale dial multiplies the **size** of the fixed sub-step (not the number of them), so the sim genuinely fast-forwards — the Solar System preset's ×1e6 runs an Earth year in ~31 s — while the per-frame step count stays bounded (≤ 8).
+
+Bodies are drawn with a per-scene minimum radius (a fraction of the scene's framing radius) so they stay visible at astronomical scales, where a real planet is sub-pixel; physics always uses the true physical radius.
 
 Accelerations use Plummer softening: `a = G·m·d / (r² + ε²)^(3/2)`, where `ε = max(0.1·(R₁+R₂), 5e4 m)`. For ≤ 64 bodies the exact O(n²) all-pairs sum runs; above that an octree (Barnes-Hut, θ = 0.5) approximates distant clusters by their centre of mass. Both paths are cross-checked to agree to better than 1% (CTest #11).
 
@@ -105,6 +107,7 @@ Scenes are plain text, one body per line, easy to read and diff:
 gsim 1
 timescale 1e+06
 grid bend 500000 200
+refradius 450000
 body px py pz vx vy vz mass density r g b a
 ...
 ```
@@ -112,6 +115,7 @@ body px py pz vx vy vz mass density r g b a
 - `gsim 1` — format version.
 - `timescale` — the time multiplier the scene was saved with.
 - `grid` — `bend|flat|off`, grid half-size (units), divisions.
+- `refradius` — the scene's framing radius (units); drives the camera framing and the visual body-size floor.
 - `body` — position (m), velocity (m/s), mass (kg), density (kg/m³), and RGBA colour (0–1).
 
 Save → load → save is byte-identical (CTest #10).
