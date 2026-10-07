@@ -104,12 +104,64 @@ static void test_pair_softening_formula() {
     CHECK_NEAR(gs::pairSoftening(tiny, huge, cfg), 5.0e4, 1.0);   // floor wins
 }
 
+static void test_orbit_closes() {
+    World w = makeOrbitWorld();
+    const glm::dvec3 r0 = w.bodies[1].position - w.bodies[0].position;
+    const double len0 = glm::length(r0);
+    // period T = 2*pi*sqrt(r^3/(G*M)) ≈ 10035 s (softened) → 1000 steps of 10 s ≈ 1 period
+    for (int i = 0; i < 1000; ++i) w.step(10.0);
+    const glm::dvec3 r1 = w.bodies[1].position - w.bodies[0].position;
+    CHECK_NEAR(glm::length(r1), len0, 0.001 * len0);          // radius within 0.1%
+    const double a0 = std::atan2(r0.z, r0.x);
+    const double a1 = std::atan2(r1.z, r1.x);
+    double sweep = a1 - a0;
+    while (sweep > 3.14159265358979) sweep -= 2 * 3.14159265358979;
+    while (sweep < -3.14159265358979) sweep += 2 * 3.14159265358979;
+    CHECK(std::fabs(sweep) < 0.063);                            // within 1% of full revolution
+}
+
+static void test_momentum_conserved_in_flight() {
+    World w = makeOrbitWorld();
+    auto p = [&] {
+        glm::dvec3 t(0.0);
+        for (const auto& b : w.bodies) t += b.mass * b.velocity;
+        return t;
+    };
+    const glm::dvec3 before = p();
+    double scale = 0.0;
+    for (const auto& b : w.bodies) scale += glm::length(b.mass * b.velocity);
+    for (int i = 0; i < 500; ++i) w.step(10.0);
+    const glm::dvec3 after = p();
+    // tolerance vs Σ|m·v| scale (brief defect B3): net momentum ≡ 0, so a value-referenced tol degenerates to 0
+    CHECK(glm::length(after - before) <= 1e-12 * scale);
+}
+
+static void test_energy_bounded() {
+    World w = makeOrbitWorld();
+    auto energy = [&] {
+        double ke = 0.0, pe = 0.0;
+        for (const auto& b : w.bodies) ke += 0.5 * b.mass * glm::dot(b.velocity, b.velocity);
+        const glm::dvec3 d = w.bodies[1].position - w.bodies[0].position;
+        const double r = glm::length(d);
+        const double eps = std::max(0.1 * (w.bodies[0].radius() + w.bodies[1].radius()), 5.0e4);
+        pe -= gs::G * w.bodies[0].mass * w.bodies[1].mass / std::sqrt(r * r + eps * eps);
+        return ke + pe;
+    };
+    const double e0 = energy();
+    for (int i = 0; i < 1000; ++i) w.step(10.0);
+    const double e1 = energy();
+    CHECK(std::fabs(e1 - e0) <= 0.01 * std::fabs(e0));
+}
+
 int main() {
     test_fps_independence();
     test_step_cap_and_clamp();
     test_paused_bit_identical();
     test_softening_no_nan_at_contact();
     test_pair_softening_formula();
+    test_orbit_closes();
+    test_momentum_conserved_in_flight();
+    test_energy_bounded();
     if (g_failures) { std::printf("%d failure(s)\n", g_failures); return 1; }
     std::printf("all physics tests passed\n");
     return 0;
