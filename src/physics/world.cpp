@@ -55,6 +55,7 @@ void World::step(double dt) {
     for (std::size_t i = 0; i < n; ++i)
         if (!bodies[i].ghost) bodies[i].velocity += 0.5 * dt * acc[i];
 
+    mergeOverlaps();
     simTime += dt;
 }
 
@@ -78,6 +79,35 @@ int World::advance(double frameDeltaSeconds) {
 
 void World::stepOnce() {
     step(SIM_DT);
+}
+
+void World::mergeOverlaps() {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (std::size_t i = 0; i < bodies.size() && !changed; ++i) {
+            if (bodies[i].ghost) continue;
+            for (std::size_t j = i + 1; j < bodies.size(); ++j) {
+                if (bodies[j].ghost) continue;
+                Body& A = bodies[i];
+                Body& B = bodies[j];
+                if (glm::length(B.position - A.position) >= A.radius() + B.radius())
+                    continue;
+                const bool aHeavier = A.mass >= B.mass;
+                Body& heavy = aHeavier ? A : B;
+                Body& light = aHeavier ? B : A;
+                const double m1 = heavy.mass, m2 = light.mass, m = m1 + m2;
+                heavy.velocity = (m1 * heavy.velocity + m2 * light.velocity) / m;
+                heavy.position = (m1 * heavy.position + m2 * light.position) / m;
+                heavy.density  = (m1 * heavy.density  + m2 * light.density)  / m;
+                heavy.mass = m;
+                const std::size_t eraseIdx = aHeavier ? j : i;
+                bodies.erase(bodies.begin() + std::ptrdiff_t(eraseIdx));
+                changed = true;
+                break;
+            }
+        }
+    }
 }
 
 } // namespace gs

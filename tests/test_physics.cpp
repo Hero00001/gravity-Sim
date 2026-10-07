@@ -136,6 +136,53 @@ static void test_momentum_conserved_in_flight() {
     CHECK(glm::length(after - before) <= 1e-12 * scale);
 }
 
+static void test_merge_conserves_momentum() {
+    World w;
+    Body a; a.mass = 1e22; a.density = 3344; a.position = {0, 0, 0};
+    a.velocity = {600, 0, 0}; a.color = {1, 0, 0, 1};
+    Body b; b.mass = 2e22; b.density = 5515; b.position = {1e5, 0, 0};
+    b.velocity = {-300, 400, 0}; b.color = {0, 1, 0, 1};
+    w.spawn(a); w.spawn(b);
+    const glm::dvec3 pBefore = a.mass * a.velocity + b.mass * b.velocity;
+    w.step(1.0 / 480.0);
+    CHECK(w.bodies.size() == 1);
+    const Body& s = w.bodies[0];
+    CHECK_NEAR(s.mass, 3e22, 1.0);
+    const glm::dvec3 pAfter = s.mass * s.velocity;
+    CHECK(glm::length(pAfter - pBefore) <= 1e-9 * glm::length(pBefore));
+    CHECK(s.color.g > 0.5f);                       // heavier body's color survives
+    CHECK_NEAR(s.density, (1e22 * 3344.0 + 2e22 * 5515.0) / 3e22, 1.0);
+}
+
+static void test_merge_chain_three() {
+    World w;
+    const double m = 1e22;
+    Body a; a.mass = m; a.position = {0, 0, 0};      a.velocity = {100, 0, 0};
+    Body b; b.mass = m; b.position = {1e5, 0, 0};    b.velocity = {0, 100, 0};
+    Body c; c.mass = m; c.position = {0, 1e5, 0};    c.velocity = {0, 0, 100};
+    w.spawn(a); w.spawn(b); w.spawn(c);
+    w.step(1.0 / 480.0);
+    CHECK(w.bodies.size() == 1);
+    CHECK_NEAR(w.bodies[0].mass, 3.0 * m, 1.0);
+    const glm::dvec3 p(100.0 * m, 100.0 * m, 100.0 * m);
+    CHECK(glm::length(w.bodies[0].mass * w.bodies[0].velocity - p)
+          <= 1e-9 * glm::length(p));
+}
+
+static void test_ghost_never_merges_or_attracts() {
+    World w;
+    Body star; star.mass = 1e30; star.position = {0, 0, 0};
+    Body ghost; ghost.mass = 1e24; ghost.position = {0, 0, 0}; ghost.ghost = true;
+    Body planet; planet.mass = 1e24; planet.position = {1e9, 0, 0};
+    w.spawn(star); w.spawn(ghost); w.spawn(planet);
+    auto acc = w.computeAccelerations();
+    CHECK(glm::length(acc[2]) > 0.0);              // planet feels the star
+    const double withGhost = glm::length(acc[2]);
+    w.removeById(ghost.id = w.bodies[1].id);
+    acc = w.computeAccelerations();
+    CHECK_NEAR(glm::length(acc[1]), withGhost, 1e-6 * withGhost);  // ghost contributed nothing
+}
+
 static void test_energy_bounded() {
     World w = makeOrbitWorld();
     auto energy = [&] {
@@ -161,6 +208,9 @@ int main() {
     test_pair_softening_formula();
     test_orbit_closes();
     test_momentum_conserved_in_flight();
+    test_merge_conserves_momentum();
+    test_merge_chain_three();
+    test_ghost_never_merges_or_attracts();
     test_energy_bounded();
     if (g_failures) { std::printf("%d failure(s)\n", g_failures); return 1; }
     std::printf("all physics tests passed\n");

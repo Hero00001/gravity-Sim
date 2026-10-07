@@ -36,6 +36,7 @@ public:
 private:
     double accum_ = 0.0;
     double trailAccum_ = 0.0;
+    void mergeOverlaps();
 };
 
 } // namespace gs
