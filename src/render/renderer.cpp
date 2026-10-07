@@ -64,6 +64,8 @@ unsigned compile(unsigned type, const char* src) {
         char log[512];
         glGetShaderInfoLog(s, 512, nullptr, log);
         std::cerr << "shader compile failed: " << log << "\n";
+        glDeleteShader(s);
+        return 0;
     }
     return s;
 }
@@ -72,11 +74,26 @@ unsigned link(const char* vs, const char* fs) {
     unsigned p = glCreateProgram();
     unsigned v = compile(GL_VERTEX_SHADER, vs);
     unsigned f = compile(GL_FRAGMENT_SHADER, fs);
+    if (!v || !f) {
+        glDeleteShader(v);
+        glDeleteShader(f);
+        glDeleteProgram(p);
+        return 0;
+    }
     glAttachShader(p, v);
     glAttachShader(p, f);
     glLinkProgram(p);
     glDeleteShader(v);
     glDeleteShader(f);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetProgramInfoLog(p, 512, nullptr, log);
+        std::cerr << "shader link failed: " << log << "\n";
+        glDeleteProgram(p);
+        return 0;
+    }
     return p;
 }
 
@@ -92,7 +109,11 @@ void setMats(unsigned prog, const Camera& cam, float aspect, const glm::mat4& mo
 bool Renderer::init() {
     progBody_ = link(kBodyVS, kBodyFS);
     progTrail_ = link(kTrailVS, kTrailFS);
-    if (!progBody_ || !progTrail_) return false;
+    if (!progBody_ || !progTrail_) {
+        if (progBody_) glDeleteProgram(progBody_);
+        if (progTrail_) glDeleteProgram(progTrail_);
+        return false;
+    }
 
     glGenVertexArrays(1, &gridVao_);
     glGenBuffers(1, &gridVbo_);
