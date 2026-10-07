@@ -42,3 +42,10 @@ Desktop.ini
 
 # --- SDD workspace (skill scratch) ---
 .superpowers/
+
+# --- Agent workspace (local-only memory / logs) ---
+.workbuddy-ai/
+
+# --- Runtime / test byproducts ---
+scenes/
+scene_rt_*.gsim

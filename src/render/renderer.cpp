@@ -1,8 +1,11 @@
 #include "render/renderer.hpp"
 #include "render/grid.hpp"
+#include "render/mesh.hpp"
 #include "physics/constants.hpp"
 #include <GL/glew.h>
 #include <glm/gtc/type_ptr.hpp>
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 
 namespace gs::render {
@@ -97,11 +100,11 @@ unsigned link(const char* vs, const char* fs) {
     return p;
 }
 
-void setMats(unsigned prog, const Camera& cam, float aspect, const glm::mat4& model) {
-    glUniformMatrix4fv(glGetUniformLocation(prog, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    glUniformMatrix4fv(glGetUniformLocation(prog, "view"), 1, GL_FALSE, glm::value_ptr(cam.view()));
-    glUniformMatrix4fv(glGetUniformLocation(prog, "projection"), 1, GL_FALSE,
-                       glm::value_ptr(cam.projection(aspect)));
+void setMats(unsigned prog, int locModel, int locView, int locProj,
+             const Camera& cam, float aspect, const glm::mat4& model) {
+    glUniformMatrix4fv(locModel, 1, GL_FALSE, glm::value_ptr(model));
+    glUniformMatrix4fv(locView, 1, GL_FALSE, glm::value_ptr(cam.view()));
+    glUniformMatrix4fv(locProj, 1, GL_FALSE, glm::value_ptr(cam.projection(aspect)));
 }
 
 } // namespace
@@ -115,8 +118,25 @@ bool Renderer::init() {
         return false;
     }
 
+    // Cache uniform locations once (spec #10): the body shader and trail shader only ever
+    // reference a fixed set of uniforms, so querying them per frame is pure waste.
+    uBody_.model       = glGetUniformLocation(progBody_, "model");
+    uBody_.view        = glGetUniformLocation(progBody_, "view");
+    uBody_.proj        = glGetUniformLocation(progBody_, "projection");
+    uBody_.objectColor = glGetUniformLocation(progBody_, "objectColor");
+    uBody_.isGrid      = glGetUniformLocation(progBody_, "isGrid");
+    uBody_.glow        = glGetUniformLocation(progBody_, "GLOW");
+    uTrail_.view       = glGetUniformLocation(progTrail_, "view");
+    uTrail_.proj       = glGetUniformLocation(progTrail_, "projection");
+    uTrail_.tintColor  = glGetUniformLocation(progTrail_, "tintColor");
+
     glGenVertexArrays(1, &gridVao_);
     glGenBuffers(1, &gridVbo_);
+    glBindVertexArray(gridVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, gridVbo_);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glBindVertexArray(0);
     glGenVertexArrays(1, &trailVao_);
     glGenBuffers(1, &trailVbo_);
     glBindVertexArray(trailVao_);
@@ -144,41 +164,158 @@ void Renderer::shutdown() {
     glDeleteProgram(progTrail_);
 }
 
-void Renderer::drawOne(const std::vector<float>& verts, const glm::vec3& posUnits,
-                       const glm::vec4& color) {
-    unsigned vao, vbo;
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
+void Renderer::draw(const gs::World& world, const Camera& cam, int fbw, int fbh,
+                    const GridConfig& grid, std::uint64_t selectedId) {
+    glViewport(0, 0, fbw, fbh);                          // every frame → resize-safe (bug 10)
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    const float aspect = fbh > 0 ? float(fbw) / float(fbh) : 1.0f;
+
+    syncBodies(world);
+    drawGrid(grid, world, cam, aspect);
+    drawTrails(world, cam, aspect);
+    drawBodies(world, cam, aspect);
+    drawSelection(world, cam, aspect, selectedId);
+}
+
+void Renderer::syncBodies(const gs::World& world) {
+    // delete GPU bodies that no longer exist (removed/merged)
+    for (auto it = gpu_.begin(); it != gpu_.end();) {
+        bool found = false;
+        for (const auto& b : world.bodies) if (b.id == it->first) { found = true; break; }
+        if (found) ++it;
+        else { glDeleteVertexArrays(1, &it->second.vao);
+               glDeleteBuffers(1, &it->second.vbo); it = gpu_.erase(it); }
+    }
+    // create / refresh
+    for (const auto& b : world.bodies) {
+        auto it = gpu_.find(b.id);
+        if (it == gpu_.end()) {
+            const double disp = std::max(b.radius(), 3.0e6);      // MIN_VISUAL (spec §4.5)
+            const auto verts = sphereVertices(disp / UNIT);
+            GpuBody g;
+            glGenVertexArrays(1, &g.vao);
+            glGenBuffers(1, &g.vbo);
+            glBindVertexArray(g.vao);
+            glBindBuffer(GL_ARRAY_BUFFER, g.vbo);
+            glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(),
+                         GL_STATIC_DRAW);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+            glEnableVertexAttribArray(0);
+            g.radius = b.radius();
+            g.count = int(verts.size() / 3);
+            gpu_.emplace(b.id, g);
+        } else if (std::fabs(b.radius() - it->second.radius) >
+                   0.005 * std::max(it->second.radius, 1.0)) {
+            const double disp = std::max(b.radius(), 3.0e6);
+            const auto verts = sphereVertices(disp / UNIT);
+            glBindBuffer(GL_ARRAY_BUFFER, it->second.vbo);
+            glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(),
+                         GL_STATIC_DRAW);
+            it->second.radius = b.radius();
+            it->second.count = int(verts.size() / 3);
+        }
+    }
+}
+
+void Renderer::drawBodies(const gs::World& world, const Camera& cam, float aspect) {
+    glUseProgram(progBody_);
+    glUniform1i(uBody_.isGrid, 0);
+    for (const auto& b : world.bodies) {
+        auto it = gpu_.find(b.id);
+        if (it == gpu_.end()) continue;
+        glUniform1i(uBody_.glow, b.glow ? 1 : 0);
+        glUniform4f(uBody_.objectColor, b.color.r, b.color.g, b.color.b, b.color.a);
+        const glm::vec3 units = glm::vec3(b.position) / float(UNIT);
+        setMats(progBody_, uBody_.model, uBody_.view, uBody_.proj, cam, aspect,
+                glm::translate(glm::mat4(1.0f), units));
+        glBindVertexArray(it->second.vao);
+        glDrawArrays(GL_TRIANGLES, 0, it->second.count);
+    }
+}
+
+void Renderer::drawGrid(const GridConfig& grid, const gs::World& world, const Camera& cam,
+                        float aspect) {
+    if (grid.mode == GridMode::Off) return;
+    const auto base = buildGridBase(grid);
+    const auto displaced = displaceGrid(base, grid, world.bodies);
 
     glUseProgram(progBody_);
-    glUniform1i(glGetUniformLocation(progBody_, "isGrid"), 0);
-    glUniform1i(glGetUniformLocation(progBody_, "GLOW"), 0);
-    glUniform4f(glGetUniformLocation(progBody_, "objectColor"),
-                color.r, color.g, color.b, color.a);
-    setMats(progBody_, Camera{}, 800.0f / 600.0f, glm::translate(glm::mat4(1.0f), posUnits));
-    glDrawArrays(GL_TRIANGLES, 0, GLint(verts.size() / 3));
+    glUniform1i(uBody_.isGrid, 1);
+    glUniform1i(uBody_.glow, 0);
+    glUniform4f(uBody_.objectColor, 1.f, 1.f, 1.f, 0.25f);
+    setMats(progBody_, uBody_.model, uBody_.view, uBody_.proj, cam, aspect, glm::mat4(1.0f));
 
-    glDeleteVertexArrays(1, &vao);
-    glDeleteBuffers(1, &vbo);
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(-1.0f, -1.0f);                        // keeps grid under bodies (z-fighting)
+    glBindVertexArray(gridVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, gridVbo_);
+    glBufferData(GL_ARRAY_BUFFER, displaced.size() * sizeof(float), displaced.data(),
+                 GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_LINES, 0, GLsizei(displaced.size() / 3));
+    glBindVertexArray(0);
+    glDisable(GL_POLYGON_OFFSET_FILL);
 }
 
-// Tasks 10/11 implement syncBodies/drawBodies/drawGrid (Task 10) and drawTrails (Task 11);
-// the Task-1 build keeps them declared but only uses a bodyless grid draw.
-void Renderer::draw(const gs::World&, const Camera& cam, int fbw, int fbh,
-                    const GridConfig&) {
-    glViewport(0, 0, fbw, fbh);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    (void)cam;
+void Renderer::drawTrails(const gs::World& world, const Camera& cam, float aspect) {
+    glUseProgram(progTrail_);
+    glUniformMatrix4fv(uTrail_.view, 1, GL_FALSE, glm::value_ptr(cam.view()));
+    glUniformMatrix4fv(uTrail_.proj, 1, GL_FALSE, glm::value_ptr(cam.projection(aspect)));
+    glBindVertexArray(trailVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, trailVbo_);
+
+    for (const auto& b : world.bodies) {
+        const auto& pts = b.trail.pts;
+        if (pts.size() < 2) continue;
+        scratch_.clear();                                 // reused → no per-frame allocation
+        scratch_.reserve(pts.size() * 4);
+        const float n = float(pts.size() - 1);
+        std::size_t i = 0;
+        for (const auto& p : pts) {
+            const glm::vec3 u = glm::vec3(p) / float(UNIT);
+            const float a = 0.65f * (float(i) / n);       // faint tail → brighter head
+            scratch_.insert(scratch_.end(), {u.x, u.y, u.z, a});
+            ++i;
+        }
+        glUniform4f(uTrail_.tintColor, b.color.r, b.color.g, b.color.b, b.color.a);
+        glBufferData(GL_ARRAY_BUFFER, scratch_.size() * sizeof(float), nullptr,
+                     GL_STREAM_DRAW);                     // orphan → reused buffer
+        glBufferSubData(GL_ARRAY_BUFFER, 0,
+                        scratch_.size() * sizeof(float), scratch_.data());
+        glDrawArrays(GL_LINE_STRIP, 0, GLsizei(pts.size()));
+    }
+    glBindVertexArray(0);
 }
 
-void Renderer::syncBodies(const gs::World&) {}
-void Renderer::drawBodies(const gs::World&, const Camera&, float) {}
-void Renderer::drawGrid(const GridConfig&, const gs::World&, const Camera&, float) {}
-void Renderer::drawTrails(const gs::World&, const Camera&, float) {}
+void Renderer::drawSelection(const gs::World& world, const Camera& cam, float aspect, std::uint64_t id) {
+    if (id == 0) return;
+    const gs::Body* sel = nullptr;
+    for (const auto& b : world.bodies) if (b.id == id) { sel = &b; break; }
+    if (!sel) return;
+    const glm::vec3 c = glm::vec3(sel->position) / float(gs::UNIT);
+    const float disp = float(std::max(sel->radius(), 3.0e6) / gs::UNIT);
+    const float ringR = disp * 1.6f + 2.0f;
+    const glm::vec3 r = cam.right();
+    const glm::vec3 u = cam.up();
+    std::vector<float> verts;
+    const int N = 48;
+    static const float PI = 3.14159265358979323846f;
+    for (int i = 0; i < N; ++i) {
+        const float a0 = 2.0f * PI * float(i) / float(N);
+        const float a1 = 2.0f * PI * float(i + 1) / float(N);
+        const glm::vec3 p0 = c + (r * std::cos(a0) + u * std::sin(a0)) * ringR;
+        const glm::vec3 p1 = c + (r * std::cos(a1) + u * std::sin(a1)) * ringR;
+        verts.insert(verts.end(), {p0.x, p0.y, p0.z, p1.x, p1.y, p1.z});
+    }
+    glUseProgram(progBody_);
+    glUniform1i(uBody_.isGrid, 1);
+    glUniform1i(uBody_.glow, 0);
+    glUniform4f(uBody_.objectColor, 1.0f, 1.0f, 0.0f, 1.0f);
+    setMats(progBody_, uBody_.model, uBody_.view, uBody_.proj, cam, aspect, glm::mat4(1.0f));
+    glBindVertexArray(gridVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, gridVbo_);
+    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_LINES, 0, GLsizei(verts.size() / 3));
+    glBindVertexArray(0);
+}
 
 } // namespace gs::render

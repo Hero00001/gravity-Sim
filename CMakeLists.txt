@@ -74,18 +74,25 @@ function(gravity_target name)
     COMMENT "Copying runtime DLLs for ${name}")
 endfunction()
 
-gravity_target(gravity_sim        gravity_sim.cpp)
-gravity_target(gravity_sim_3Dgrid gravity_sim_3Dgrid.cpp)
-gravity_target(3D_test            3D_test.cpp)
-
-gravity_target(gravity_sim_v2
+gravity_target(gravity_sim
   src/app/main.cpp
   src/render/renderer.cpp
-  src/render/mesh.cpp)
+  src/render/mesh.cpp
+  src/render/grid.cpp
+  src/render/hud.cpp
+  src/app/input.cpp
+  src/physics/world.cpp
+  src/physics/scene.cpp
+  src/physics/barnes_hut.cpp)
 
 enable_testing()
 
-add_executable(test_physics tests/test_physics.cpp src/physics/world.cpp)
+add_executable(test_physics tests/test_physics.cpp src/physics/world.cpp src/physics/scene.cpp src/physics/barnes_hut.cpp)
 target_include_directories(test_physics PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src ${GLM_INCLUDE_DIR})
 add_test(NAME physics COMMAND test_physics)
+
+add_executable(test_render tests/test_render.cpp src/render/mesh.cpp src/render/grid.cpp)
+target_include_directories(test_render PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src ${GLM_INCLUDE_DIR})
+add_test(NAME render COMMAND test_render)

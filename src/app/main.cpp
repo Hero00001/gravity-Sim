@@ -3,24 +3,37 @@
 #include "render/renderer.hpp"
 #include "render/mesh.hpp"
 #include "render/camera.hpp"
+#include "render/grid.hpp"
 #include "physics/constants.hpp"
+#include "app/input.hpp"
+#include "render/hud.hpp"
+#include <string>
 #include <iostream>
+#include <cmath>
 
 namespace {
-gs::render::Camera* g_cam = nullptr;
-double g_lastX = 400.0, g_lastY = 300.0;
-bool g_firstMouse = true;
+// Aggregates the per-run app state so GLFW callbacks can reach it via the global pointer.
+struct App {
+    gs::World world;
+    gs::render::Camera cam;
+    gs::app::Input input;
+    gs::render::Hud hud;
+};
+App* g_app = nullptr;
 
-void cursorCb(GLFWwindow*, double x, double y) {
-    if (g_firstMouse) { g_lastX = x; g_lastY = y; g_firstMouse = false; }
-    g_cam->rotate(float(x - g_lastX) * 0.1f, float(g_lastY - y) * 0.1f);
-    g_lastX = x; g_lastY = y;
+void keyCb(GLFWwindow*, int key, int, int action, int mods) {
+    g_app->input.onKey(key, action, mods);
 }
+void mouseBtnCb(GLFWwindow*, int button, int action, int) {
+    g_app->input.onMouseButton(button, action);
+}
+void cursorCb(GLFWwindow*, double x, double y) { g_app->input.onCursor(x, y); }
+void scrollCb(GLFWwindow*, double, double y) { g_app->input.onScroll(y); }
 } // namespace
 
 int main() {
     if (!glfwInit()) { std::cerr << "glfwInit failed\n"; return 1; }
-    GLFWwindow* win = glfwCreateWindow(800, 600, "Gravity Sim v2", nullptr, nullptr);
+    GLFWwindow* win = glfwCreateWindow(800, 600, "Gravity Sim", nullptr, nullptr);
     if (!win) { std::cerr << "window failed\n"; glfwTerminate(); return 1; }
     glfwMakeContextCurrent(win);
     glewExperimental = GL_TRUE;
@@ -29,35 +42,78 @@ int main() {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    gs::render::Camera cam;
-    g_cam = &cam;
+    App app;
+    g_app = &app;
+
+    // App starts with a preset loaded (spec #3 / bug 9): wire input to the app state
+    // and load preset 1 (Solar System), which also auto-frames the camera.
+    app.input.bind(&app.world, &app.cam);
+    app.input.loadPreset(1);
+
+    glfwSetWindowUserPointer(win, &app);
+    glfwSetKeyCallback(win, keyCb);
+    glfwSetMouseButtonCallback(win, mouseBtnCb);
     glfwSetCursorPosCallback(win, cursorCb);
+    glfwSetScrollCallback(win, scrollCb);
     glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     gs::render::Renderer renderer;
     if (!renderer.init()) return 1;
+    if (!app.hud.init()) return 1;
 
-    double last = glfwGetTime();
+    double last = glfwGetTime();                          // first-frame guard (bug 13)
     while (!glfwWindowShouldClose(win)) {
         const double now = glfwGetTime();
-        const float fd = float(now - last);
+        const double fd = now - last;
         last = now;
-
-        const float speed = 5000.0f * fd;
-        if (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS) cam.pos += speed * cam.front();
-        if (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS) cam.pos -= speed * cam.front();
-        if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS) cam.pos -= speed * cam.right();
-        if (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS) cam.pos += speed * cam.right();
-        if (glfwGetKey(win, GLFW_KEY_SPACE) == GLFW_PRESS) cam.pos += speed * cam.up();
-        if (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) cam.pos -= speed * cam.up();
-        if (glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS) glfwSetWindowShouldClose(win, GLFW_TRUE);
 
         int fbw, fbh;
         glfwGetFramebufferSize(win, &fbw, &fbh);
-        renderer.draw(gs::World{}, cam, fbw, fbh, gs::render::GridConfig{});
+
+        gs::app::InputContext ctx{&app.world, &app.cam, fd, fbw, fbh};
+        app.input.update(win, ctx);
+        if (app.input.quitRequested) glfwSetWindowShouldClose(win, GLFW_TRUE);
+
+        app.world.advance(fd);
+
+        gs::render::HudData hd;
+        hd.fbw = fbw; hd.fbh = fbh;
+        hd.fps = float(1.0 / std::max(fd, 1e-3));
+        hd.simTime = app.world.simTime;
+        hd.timeScale = app.world.timeScale;
+        hd.paused = app.world.paused;
+        hd.bodyCount = int(app.world.bodies.size());
+        hd.sceneName = app.input.sceneName();
+        hd.hudVisible = app.input.hudVisible();
+        {
+            const auto sid = app.input.selectedId();
+            if (sid != 0) {
+                for (const auto& b : app.world.bodies) {
+                    if (b.id != sid) continue;
+                    hd.hasSelection = true; hd.selId = b.id;
+                    hd.selMass = b.mass;
+                    hd.selSpeed = glm::length(b.velocity) / 1000.0;     // km/s
+                    double maxm = -1.0; const gs::Body* heavy = nullptr;
+                    for (const auto& o : app.world.bodies)
+                        if (!o.ghost && o.mass > maxm) { maxm = o.mass; heavy = &o; }
+                    if (heavy && heavy->id != b.id)
+                        hd.selDist = glm::length(b.position - heavy->position) / 1000.0;  // km
+                    break;
+                }
+            }
+            if (app.input.isPlacing()) {
+                hd.placing = true;
+                for (const auto& b : app.world.bodies)
+                    if (b.id == app.input.placingId()) { hd.placeMass = b.mass; break; }
+            }
+        }
+
+        renderer.draw(app.world, app.cam, fbw, fbh, app.input.gridConfig(), app.input.selectedId());
+        app.hud.draw(hd);
         glfwSwapBuffers(win);
         glfwPollEvents();
     }
+    app.hud.shutdown();
     renderer.shutdown();
     glfwTerminate();
     return 0;

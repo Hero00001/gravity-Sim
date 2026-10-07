@@ -29,6 +29,7 @@ struct Body {
     std::uint64_t id = 0;
     bool ghost = false;         // true while being placed: no forces, no merges, no trail
     bool glow  = false;         // rendered as blown-out point source
+    bool grabbed = false;       // true while dragged: no integration/merge, but still attracts
     TrailRing trail;
 
     double radius() const {
