@@ -84,3 +84,8 @@ gravity_target(gravity_sim_v2
   src/render/mesh.cpp)
 
 enable_testing()
+
+add_executable(test_physics tests/test_physics.cpp src/physics/world.cpp)
+target_include_directories(test_physics PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src ${GLM_INCLUDE_DIR})
+add_test(NAME physics COMMAND test_physics)
