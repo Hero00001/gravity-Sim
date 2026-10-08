@@ -100,12 +100,55 @@ static void test_camera_pick_math() {
     CHECK(std::fabs(hit.z - target.z) < 1e-2f);
 }
 
+static void test_grid_bend_is_visible_and_localized() {
+    // The signature "spacetime sheet" must actually be visible: a real Sun's Schwarzschild
+    // radius makes the physical dip ~1e-8 of the grid, i.e. a dead-flat sheet. The bend
+    // therefore uses a scene-relative well whose depth still tracks mass. It must be a
+    // meaningful fraction of the grid AND localized around the mass (not a global tilt).
+    gs::render::GridConfig cfg;                       // size 20000, div 25
+    const auto base = gs::render::buildGridBase(cfg);
+    gs::Body heavy; heavy.mass = 1.989e30; heavy.density = 1408.0;
+    heavy.position = {0, 0, 0};
+    const auto bent = gs::render::displaceGrid(base, cfg, {heavy});
+    CHECK(bent.size() == base.size());
+
+    double maxDip = 0.0, nearDip = 0.0, farDip = 1e30;
+    for (std::size_t i = 0; i < bent.size(); i += 3) {
+        const double x = base[i], z = base[i + 2];
+        const double r = std::sqrt(x * x + z * z);
+        const double dip = double(base[i + 1]) - double(bent[i + 1]);
+        maxDip = std::max(maxDip, dip);
+        if (r < 0.10 * cfg.sizeUnits) nearDip = std::max(nearDip, dip);
+        if (r > 0.45 * cfg.sizeUnits) farDip = std::min(farDip, dip);
+    }
+    CHECK(maxDip > 0.05 * cfg.sizeUnits);              // clearly visible, not a flat sheet
+    CHECK(maxDip <= 0.25 * cfg.sizeUnits + 1e-6);      // clamp respected
+    CHECK(nearDip > farDip);                           // a well, not a global tilt
+
+    // Within a scene, the heavier body must carve the deeper well (the sheet keeps the
+    // mass ordering; the absolute depth is normalized to the scene's heaviest body).
+    gs::Body heavy2 = heavy; heavy2.position = {-5000, 0, 0};
+    gs::Body light  = heavy; light.mass = 1.989e27; light.position = {5000, 0, 0};
+    const auto bent2 = gs::render::displaceGrid(base, cfg, {heavy2, light});
+    double dipAtHeavy = 0.0, dipAtLight = 0.0, dHeavy = 1e30, dLight = 1e30;
+    for (std::size_t i = 0; i < bent2.size(); i += 3) {
+        const double x = base[i], z = base[i + 2];
+        const double dip = double(base[i + 1]) - double(bent2[i + 1]);
+        const double rh = std::hypot(x - heavy2.position.x, z - heavy2.position.z);
+        const double rl = std::hypot(x - light.position.x, z - light.position.z);
+        if (rh < dHeavy) { dHeavy = rh; dipAtHeavy = dip; }
+        if (rl < dLight) { dLight = rl; dipAtLight = dip; }
+    }
+    CHECK(dipAtHeavy > dipAtLight);
+}
+
 int main() {
     test_camera_pick_math();
     test_sphere_mesh_bounds();
     test_grid_base_stable_and_pure();
     test_grid_bodyless_displacement_identity();
     test_grid_flat_mode_identity_and_bend_dips_down();
+    test_grid_bend_is_visible_and_localized();
     if (g_failures) { std::printf("%d failure(s)\n", g_failures); return 1; }
     std::printf("all render tests passed\n");
     return 0;

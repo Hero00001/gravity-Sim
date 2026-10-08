@@ -14,8 +14,11 @@ void Input::update(GLFWwindow* win, InputContext& ctx) {
     cam_ = ctx.cam;
     fbw_ = ctx.fbw; fbh_ = ctx.fbh;
 
-    // Camera flight is polled every frame (fixes stuttery WASD, bug 7).
-    const float speed = 5000.0f * float(ctx.frameDelta);
+    // Camera flight is polled every frame (fixes stuttery WASD, bug 7). Speed scales with
+    // the distance from the origin so navigation feels the same in every scene: crossing
+    // the Solar System (≈1e6 units out) must not take minutes, while nudging around the
+    // Chaos disk (≈2e4 units) must not teleport.
+    const float speed = std::max(5000.0f, 0.5f * glm::length(cam_->pos)) * float(ctx.frameDelta);
     if (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS) cam_->pos += speed * cam_->front();
     if (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS) cam_->pos -= speed * cam_->front();
     if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS) cam_->pos -= speed * cam_->right();
@@ -31,9 +34,15 @@ void Input::update(GLFWwindow* win, InputContext& ctx) {
 
     // Follow: lock camera to the followed body each frame (after the WASD poll, so it wins).
     if (followId_ != 0) {
+        bool found = false;
         for (const auto& b : world_->bodies) {
-            if (b.id == followId_) { cam_->updateFollow(glm::vec3(b.position) / float(gs::UNIT)); break; }
+            if (b.id == followId_) {
+                cam_->updateFollow(glm::vec3(b.position) / float(gs::UNIT));
+                found = true;
+                break;
+            }
         }
+        if (!found) { cam_->stopFollow(); followId_ = 0; }   // followed body merged/removed
     }
 
     // Grab: track pointer velocity (units/sec) for the fling on release.
@@ -44,24 +53,37 @@ void Input::update(GLFWwindow* win, InputContext& ctx) {
         grabVelUnits_ = grabVelUnits_ * 0.5f + vel * 0.5f;
         grabPrevUnits_ = cur;
     }
+
+    // Hover feedback: what is under the cursor right now (skipped while busy).
+    hoverId_ = (mode_ == Mode::Idle && !grabbing_) ? pickBody(lastX_, lastY_) : 0;
+
+    // Show the controls overlay for the first ~14 s, then get out of the way (F1 recalls).
+    appTime_ += ctx.frameDelta;
+    if (!helpAutoHidden_ && appTime_ > 14.0) { helpVisible_ = false; helpAutoHidden_ = true; }
 }
 
 void Input::onCursor(double x, double y) {
-    if (firstMouse_) { lastX_ = float(x); lastY_ = float(y); firstMouse_ = false; }
+    if (firstMouse_) { lastX_ = float(x); lastY_ = float(y); firstMouse_ = false; return; }
+    const float dx = float(x) - lastX_;
+    const float dy = float(y) - lastY_;
+    lastX_ = float(x); lastY_ = float(y);
+
+    // Dragging a body: the pointer drives its position on the grab plane.
     if (grabbing_) {
         const glm::vec3 p = grabPlanePointUnits(float(x), float(y));
         for (auto& b : world_->bodies)
             if (b.id == grabbedId_) { b.position = glm::dvec3(p) * double(gs::UNIT); break; }
-        lastX_ = float(x); lastY_ = float(y);
         return;
     }
-    cam_->rotate(float(x - lastX_) * 0.1f, float(lastY_ - y) * 0.1f);
-    lastX_ = float(x); lastY_ = float(y);
 
-    // Promote a press into a grab once the pointer moves > 5 px (bug 12 discipline).
-    if (pendingPress_) {
-        const float dx = float(x) - pressX_, dy = float(y) - pressY_;
-        if (std::sqrt(dx * dx + dy * dy) > 5.0f) {
+    // Look around only while a look button is held (RMB, or MMB while placing).
+    if (lookHeld_) cam_->rotate(dx * 0.12f, -dy * 0.12f);
+
+    // Promote a press into a grab once the pointer moves > 5 px from the press point
+    // (bug 12 discipline: < 5 px stays a "click" → select).
+    if (pendingPress_ && !lookHeld_) {
+        const float ddx = float(x) - pressX_, ddy = float(y) - pressY_;
+        if (std::sqrt(ddx * ddx + ddy * ddy) > 5.0f) {
             grabbing_ = true;
             grabbedId_ = pressBodyId_;
             pendingPress_ = false;
@@ -85,13 +107,18 @@ void Input::startPlacing() {
     b.color = {0.9f, 0.4f, 0.2f, 1.0f};
     b.ghost = true;
     b.trail.setCap(kTrailCaps[trailCapIdx_]);
-    // Spawn ~20% of the way from the camera toward its focus, IN FRONT of the camera.
-    // Work in world-units, then convert to metres once. (The old code added the camera
-    // position in *units* to an offset in *metres*, so the body landed ~d0 units from
-    // the ORIGIN — nowhere near the camera — and appeared as "nothing happened".)
+    // Spawn along the cursor ray, a fraction of the view distance ahead, so the body
+    // appears exactly where the user clicked. Work in world-units and convert once.
     const float viewDist = std::max(glm::length(cam_->pos), 100.0f);   // units
-    const float d0 = viewDist * 0.2f;                                  // units
-    const glm::vec3 spawnUnits = cam_->pos + cam_->front() * d0;
+    const float d0 = viewDist * 0.25f;                                 // units
+    glm::vec3 dir = cam_->front();
+    if (fbw_ > 0 && fbh_ > 0) {
+        const float aspect = float(fbw_) / float(fbh_);
+        const float ndcX = (lastX_ / float(fbw_)) * 2.0f - 1.0f;
+        const float ndcY = 1.0f - (lastY_ / float(fbh_)) * 2.0f;
+        dir = cam_->unprojectDir(ndcX, ndcY, aspect);
+    }
+    const glm::vec3 spawnUnits = cam_->pos + dir * d0;
     b.position = glm::dvec3(spawnUnits) * double(gs::UNIT);
     placingId_ = world_->spawn(b);
     mode_ = Mode::Placing;
@@ -173,13 +200,25 @@ void Input::onMouseButton(int button, int action) {
                 }
                 grabbing_ = false; grabbedId_ = 0;
             } else if (pendingPress_) {
-                selectedId_ = pressBodyId_;                // click without drag → select
+                // Click without drag → select (a moved pointer was promoted to a grab).
+                const float ddx = lastX_ - pressX_, ddy = lastY_ - pressY_;
+                if (std::sqrt(ddx * ddx + ddy * ddy) <= 5.0f) selectedId_ = pressBodyId_;
                 pendingPress_ = false;
             }
         }
     }
-    if (button == GLFW_MOUSE_BUTTON_RIGHT)
-        rmbHeld_ = (action == GLFW_PRESS);
+    if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+        if (action == GLFW_PRESS) {
+            if (mode_ == Mode::Placing) rmbHeld_ = true;   // grow the body being placed
+            else                        lookHeld_ = true;  // otherwise: look around
+        } else {
+            rmbHeld_ = false;
+            lookHeld_ = false;
+        }
+    }
+    // Middle button always looks (so the view can be turned while placing, too).
+    if (button == GLFW_MOUSE_BUTTON_MIDDLE)
+        lookHeld_ = (action == GLFW_PRESS);
 }
 
 void Input::onScroll(double yoffset) {
@@ -188,7 +227,8 @@ void Input::onScroll(double yoffset) {
             if (b.id != placingId_) continue;
             const glm::vec3 units = glm::vec3(b.position) / float(gs::UNIT);
             const float d = glm::length(units - cam_->pos);
-            const glm::vec3 moved = units + cam_->front() * float(yoffset) * 0.1f * d;
+            const glm::vec3 away = (d > 1e-3f) ? (units - cam_->pos) / d : cam_->front();
+            const glm::vec3 moved = units + away * float(yoffset) * 0.1f * d;
             b.position = glm::dvec3(moved) * double(gs::UNIT);
         }
     } else {
@@ -224,6 +264,11 @@ void Input::onKey(int key, int action, int) {
         world_->timeScale = 1.0;
     // H toggles the HUD.
     if (key == GLFW_KEY_H && action == GLFW_PRESS) hudVisible_ = !hudVisible_;
+    // F1 toggles the controls overlay.
+    if (key == GLFW_KEY_F1 && action == GLFW_PRESS) {
+        helpVisible_ = !helpVisible_;
+        helpAutoHidden_ = true;          // an explicit toggle wins over the auto-hide
+    }
 
     // Preset scenes 1-4 (spec #3).
     if (action == GLFW_PRESS && key >= GLFW_KEY_1 && key <= GLFW_KEY_4)

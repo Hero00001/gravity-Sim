@@ -9,7 +9,7 @@ namespace gs {
 constexpr std::size_t kBarnesHutThreshold = 64;   // spec §4.7: direct below/at 64, BH above
 
 double pairSoftening(const Body& a, const Body& b, const WorldConfig& cfg) {
-    return std::max(cfg.softeningFrac * (a.radius() + b.radius()), cfg.softeningFloor);
+    return pairSoftening(a, b, cfg.softeningFrac, cfg.softeningFloor);
 }
 
 std::uint64_t World::spawn(const Body& b) {
@@ -40,24 +40,12 @@ std::vector<glm::dvec3> World::computeAccelerations() const {
     const std::size_t n = bodies.size();
     if (n < 2) return std::vector<glm::dvec3>(n, glm::dvec3(0.0));
 
-    // Barnes-Hut above the threshold (spec §4.7, θ = 0.5). Below it, exact O(n²).
+    // One canonical pair-softening (spec §4.4) for both paths, so the forces do not
+    // change when the solver swaps at the 64-body threshold. Barnes-Hut above it,
+    // exact O(n²) at or below.
     if (n > kBarnesHutThreshold)
-        return barnesHutAccelerations(bodies, 0.5, config.softeningFloor);
-
-    std::vector<glm::dvec3> acc(n, glm::dvec3(0.0));
-    for (std::size_t i = 0; i < n; ++i) {
-        if (bodies[i].ghost) continue;                       // grabbed bodies still attract
-        for (std::size_t j = 0; j < n; ++j) {
-            if (i == j || bodies[j].ghost) continue;
-            const glm::dvec3 d = bodies[j].position - bodies[i].position;
-            const double r2 = glm::dot(d, d);
-            const double eps = pairSoftening(bodies[i], bodies[j], config);
-            const double u2 = r2 + eps * eps;
-            const double denom = u2 * std::sqrt(u2);          // (r^2+eps^2)^1.5
-            if (denom > 0.0) acc[i] += G * bodies[j].mass * d / denom;
-        }
-    }
-    return acc;
+        return barnesHutAccelerations(bodies, 0.5, config.softeningFrac, config.softeningFloor);
+    return directAccelerations(bodies, config.softeningFrac, config.softeningFloor);
 }
 
 void World::step(double dt) {
@@ -86,26 +74,33 @@ int World::advance(double frameDeltaSeconds) {
 
     if (paused) return 0;                    // no stepping, merging, or trail sampling
 
-    // Time warp without a step-count explosion. The sub-step *size* scales with the
-    // requested time scale, so the number of steps per frame stays ~fd/SIM_DT (<= the
-    // 8-step cap) no matter how fast the sim is asked to run:
-    //     sim-seconds advanced per real second = steps * dt / fd
-    //                                          = (fd/SIM_DT) * (SIM_DT*timeScale) / fd
-    //                                          = timeScale.   (correct fast-forward)
-    // Previously the accumulator added fd*timeScale while always stepping a fixed
-    // SIM_DT, so at timeScale >= ~1 the 8-step cap was hit every frame and the backlog
-    // was discarded — capping the sim at real-time speed and freezing every preset
-    // (Solar System runs at 1e6x but looked static).
-    const double dt = SIM_DT * timeScale;
-    accum_ += fd;
+    // Advance exactly `fd * timeScale` sim-seconds, never more and never less, at any
+    // frame rate and any time scale:
+    //   * normally every sub-step is the preferred fixed size dtBase = SIM_DT * timeScale,
+    //     which keeps ts = 1 bit-identical to a pure fixed-step integrator;
+    //   * if the frame's debt exceeds what the step budget can pay at dtBase (a slow
+    //     frame, or a big time scale), the sub-step size grows so the debt is still paid
+    //     in full — the sim keeps the requested speed instead of silently running slow.
+    // The old code always stepped a fixed SIM_DT and then *discarded* the backlog, so at
+    // timeScale 1e4..1e6 the 8-step cap was hit every frame and the presets looked frozen.
+    const double dtBase = SIM_DT * timeScale;
+    const double owed = accum_ + fd * timeScale;
+
+    // +1e-9 absorbs float error so an exact whole number of sub-steps (e.g. 8.0 at 60 fps)
+    // is never truncated to 7 and leaked into the next frame.
+    int steps = (dtBase > 0.0) ? int(owed / dtBase + 1e-9) : 0;   // whole sub-steps we can afford
+    if (steps > config.maxStepsPerFrame) steps = config.maxStepsPerFrame;
 
     int n = 0;
-    while (accum_ >= SIM_DT && n < config.maxStepsPerFrame) {
-        step(dt);
-        accum_ -= SIM_DT;
-        ++n;
+    double dt = dtBase;
+    if (steps > 0) {
+        // Pay the whole debt with a larger sub-step only when the step budget binds.
+        if (steps == config.maxStepsPerFrame && owed > steps * dtBase) dt = owed / double(steps);
+        for (int i = 0; i < steps; ++i) step(dt);
+        n = steps;
     }
-    if (n == config.maxStepsPerFrame && accum_ >= SIM_DT) accum_ = 0.0;  // discard backlog
+    accum_ = owed - double(n) * dt;          // residue (< dtBase) carries into the next frame
+    if (accum_ < 0.0) accum_ = 0.0;          // (capped case pays the debt exactly)
 
     if (n > 0) {
         trailAccum_ += rawFd;   // raw wall delta (pre-clamp) — wall-clock based, timeScale-independent

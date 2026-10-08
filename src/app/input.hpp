@@ -31,7 +31,11 @@ public:
     void update(GLFWwindow* win, InputContext& ctx);   // polled every frame
     bool quitRequested = false;
     std::uint64_t selectedId() const { return selectedId_; }
+    std::uint64_t hoverId() const { return hoverId_; }
     bool hudVisible() const { return hudVisible_; }
+    bool helpVisible() const { return helpVisible_; }
+    bool isFollowing() const { return followId_ != 0; }
+    int trailCap() const { return int(kTrailCaps[trailCapIdx_]); }
     bool isPlacing() const { return mode_ == Mode::Placing; }
     std::uint64_t placingId() const { return placingId_; }
 
@@ -46,10 +50,14 @@ private:
     Mode mode_ = Mode::Idle;
     std::uint64_t placingId_ = 0;
     bool rmbHeld_ = false;
+    bool lookHeld_ = false;                             // RMB/MMB drag = look around
     float lastX_ = 400.f, lastY_ = 300.f;
     bool firstMouse_ = true;
     int trailCapIdx_ = 4;                               // 512
     bool hudVisible_ = true;
+    bool helpVisible_ = true;                           // F1; auto-hides after a while
+    bool helpAutoHidden_ = false;
+    double appTime_ = 0.0;                              // wall seconds since start
     gs::World* world_ = nullptr;
     gs::render::Camera* cam_ = nullptr;
     int fbw_ = 800, fbh_ = 600;
@@ -57,6 +65,7 @@ private:
 
     // selection / follow / grab
     std::uint64_t selectedId_ = 0;
+    std::uint64_t hoverId_ = 0;
     std::uint64_t followId_ = 0;
     bool grabbing_ = false;
     std::uint64_t grabbedId_ = 0;

@@ -33,11 +33,16 @@ void scrollCb(GLFWwindow*, double, double y) { g_app->input.onScroll(y); }
 
 int main() {
     if (!glfwInit()) { std::cerr << "glfwInit failed\n"; return 1; }
-    GLFWwindow* win = glfwCreateWindow(800, 600, "Gravity Sim", nullptr, nullptr);
+    // 4x MSAA for smooth sphere/grid edges (silently falls back if unsupported).
+    glfwWindowHint(GLFW_SAMPLES, 4);
+    GLFWwindow* win = glfwCreateWindow(1280, 800, "Gravity Sim", nullptr, nullptr);
     if (!win) { std::cerr << "window failed\n"; glfwTerminate(); return 1; }
     glfwMakeContextCurrent(win);
+    glfwSwapInterval(1);                       // vsync: stable ~60 fps + no GPU spin
     glewExperimental = GL_TRUE;
     if (glewInit() != GLEW_OK) { std::cerr << "glewInit failed\n"; return 1; }
+    glClearColor(0.016f, 0.020f, 0.031f, 1.0f);  // deep space, not pure black
+    glEnable(GL_MULTISAMPLE);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -55,7 +60,11 @@ int main() {
     glfwSetMouseButtonCallback(win, mouseBtnCb);
     glfwSetCursorPosCallback(win, cursorCb);
     glfwSetScrollCallback(win, scrollCb);
-    glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    // Visible cursor: screen-space picking (select / grab / place) needs real window
+    // coordinates. GLFW_CURSOR_DISABLED reports an *unbounded* virtual position, which
+    // made every click miss its target and spawn a body instead. Looking around is now
+    // a held RMB (or MMB) drag — see input.cpp.
+    glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 
     gs::render::Renderer renderer;
     if (!renderer.init()) return 1;
@@ -85,6 +94,9 @@ int main() {
         hd.bodyCount = int(app.world.bodies.size());
         hd.sceneName = app.input.sceneName();
         hd.hudVisible = app.input.hudVisible();
+        hd.helpVisible = app.input.helpVisible();
+        hd.following = app.input.isFollowing();
+        hd.trailCap = app.input.trailCap();
         {
             const auto sid = app.input.selectedId();
             if (sid != 0) {
@@ -108,13 +120,15 @@ int main() {
             }
         }
 
-        renderer.draw(app.world, app.cam, fbw, fbh, app.input.gridConfig(), app.input.selectedId());
+        renderer.draw(app.world, app.cam, fbw, fbh, app.input.gridConfig(),
+                      app.input.selectedId(), app.input.hoverId());
         app.hud.draw(hd);
         glfwSwapBuffers(win);
         glfwPollEvents();
     }
     app.hud.shutdown();
     renderer.shutdown();
+    glfwDestroyWindow(win);
     glfwTerminate();
     return 0;
 }

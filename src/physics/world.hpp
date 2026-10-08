@@ -2,6 +2,7 @@
 #include "physics/body.hpp"
 #include <vector>
 #include <cstdint>
+#include <cmath>
 #include <algorithm>
 
 namespace gs {
@@ -33,9 +34,20 @@ public:
     // solar system), so every body is drawn at least this big. It is raised per scene
     // by applySceneToWorld() to a fraction of the scene radius. Purely visual — physics
     // always uses Body::radius().
+    //
+    // Below the floor a compressive map is applied instead of a hard clamp, so bodies
+    // stay visible AND a heavier body still reads as bigger:
+    //     display = floor · (1 + span · (r/floor)^pow)      with 0 < r < floor
+    // i.e. display ∈ [floor, (1+span)·floor], strictly increasing in the physical
+    // radius. A hard clamp would have drawn the Sun and Mercury the same size.
     double minVisualRadiusMeters = 3.0e6;   // 0.3 world-units (spec MIN_VISUAL)
+    static constexpr double kVisualSpan = 3.0;   // max extra size above the floor
+    static constexpr double kVisualPow  = 0.25;  // compression strength
     double displayRadius(const Body& b) const {
-        return std::max(b.radius(), minVisualRadiusMeters);
+        const double r = b.radius();
+        if (r >= minVisualRadiusMeters) return r;
+        const double x = std::max(r, 0.0) / minVisualRadiusMeters;   // in [0, 1)
+        return minVisualRadiusMeters * (1.0 + kVisualSpan * std::pow(x, kVisualPow));
     }
 
     std::uint64_t spawn(const Body& b);

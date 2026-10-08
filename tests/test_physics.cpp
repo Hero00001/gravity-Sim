@@ -317,9 +317,9 @@ static void test_scene_roundtrip() {
     std::remove(pb.c_str());
 }
 
-static double bh_maxrel_for(const std::vector<gs::Body>& bodies, double eps) {
-    auto direct = gs::directAccelerations(bodies, eps);
-    auto bh = gs::barnesHutAccelerations(bodies, 0.5, eps);   // θ = 0.5 per spec §4.7
+static double bh_maxrel_for(const std::vector<gs::Body>& bodies, double floor) {
+    auto direct = gs::directAccelerations(bodies, 0.1, floor);
+    auto bh = gs::barnesHutAccelerations(bodies, 0.5, 0.1, floor);   // θ = 0.5 per spec §4.7
     const int N = static_cast<int>(bodies.size());
     double maxRel = 0.0, maxMag = 0.0;
     int worst = -1;
@@ -372,10 +372,100 @@ static void test_scene_visual_floor() {
     CHECK(w.minVisualRadiusMeters > 1.0e9);                    // well above the 3e6 default
     for (const auto& b : w.bodies)
         CHECK(w.displayRadius(b) >= w.minVisualRadiusMeters);
-    // A small rock still displays at the (large) floor, but its physical radius is intact.
+    // A small rock still displays at (or just above) the floor, but its physical radius
+    // is intact — visuals never feed back into physics.
     gs::Body rock; rock.mass = 1e22; rock.density = 3344.0;
     CHECK(rock.radius() < w.minVisualRadiusMeters);              // genuinely below the floor
-    CHECK_NEAR(w.displayRadius(rock), w.minVisualRadiusMeters, 0.0);
+    CHECK(w.displayRadius(rock) >= w.minVisualRadiusMeters);
+    CHECK(w.displayRadius(rock) < (1.0 + gs::World::kVisualSpan) * w.minVisualRadiusMeters);
+
+    // The compressive map must be monotone: heavier bodies still read as bigger, so the
+    // Sun does not look the same size as Mercury (a plain max() clamp did exactly that).
+    gs::Body light = rock;
+    gs::Body heavy = rock; heavy.mass = 1e26;
+    CHECK(w.displayRadius(heavy) > w.displayRadius(light));
+    const gs::Body& sun = w.bodies[0];
+    const gs::Body& mercury = w.bodies[1];
+    CHECK(w.displayRadius(sun) > w.displayRadius(mercury));
+    CHECK(w.displayRadius(sun) < (1.0 + gs::World::kVisualSpan) * w.minVisualRadiusMeters);
+}
+
+static void test_solver_softening_is_consistent() {
+    // The Barnes-Hut path must use the SAME per-pair Plummer softening as the direct
+    // solver, otherwise the forces (and the whole simulation) would jump the moment a
+    // 65th body pushed the sim onto the tree. Two bodies = one tree split, so the
+    // tree-code answer must reduce to the exact pairwise force at machine precision.
+    std::vector<gs::Body> b(2);
+    b[0].mass = 1e24; b[0].density = 3344.0; b[0].position = {0, 0, 0};
+    b[1].mass = 1e22; b[1].density = 3344.0; b[1].position = {3e6, 0, 0};  // close: eps matters
+    const double floorM = 5e4;
+    auto dir = gs::directAccelerations(b, 0.1, floorM);
+    auto bh  = gs::barnesHutAccelerations(b, 0.5, 0.1, floorM);
+    for (int i = 0; i < 2; ++i) {
+        const double m = glm::length(dir[i]);
+        CHECK(m > 0.0);
+        CHECK(glm::length(bh[i] - dir[i]) <= 1e-9 * m);
+    }
+}
+
+static void test_solver_switch_is_continuous() {
+    // 65 bodies: World now uses Barnes-Hut (> 64). Crossing the threshold must not be a
+    // physics discontinuity — the tree answer must stay close to the exact direct solve.
+    // (A well-spread lattice is used so no body has a near-zero net force, which would
+    // make a relative tolerance meaningless.)
+    const int N = 65;
+    const double R = 6e10;
+    std::mt19937 rng(4242);
+    std::uniform_real_distribution<double> u01(0.0, 1.0);
+    std::uniform_real_distribution<double> lm(20.0, 24.0);
+    const double golden = 3.14159265358979323846 * (3.0 - std::sqrt(5.0));
+    World w;
+    for (int i = 0; i < N; ++i) {
+        const double y = 1.0 - 2.0 * (i + 0.5) / N;
+        const double rr = std::cbrt((i + 0.5) / double(N));
+        const double r = std::sqrt(1.0 - y * y);
+        const double a = golden * i;
+        const double jit = 1.0 + (u01(rng) - 0.5) * 0.06;
+        Body b; b.mass = std::pow(10.0, lm(rng)); b.density = 3000.0;
+        b.position = {std::cos(a) * r * R * rr * jit, y * R * rr * jit,
+                      std::sin(a) * r * R * rr * jit};
+        w.spawn(b);
+    }
+    CHECK(w.bodies.size() == 65);
+    const auto bh  = w.computeAccelerations();                       // Barnes-Hut path
+    const auto dir = gs::directAccelerations(w.bodies, w.config.softeningFrac,
+                                             w.config.softeningFloor);  // exact reference
+    double maxRel = 0.0;
+    for (std::size_t i = 0; i < w.bodies.size(); ++i) {
+        const double m = glm::length(dir[i]);
+        CHECK(m > 0.0);
+        maxRel = std::max(maxRel, glm::length(bh[i] - dir[i]) / m);
+    }
+    CHECK(maxRel < 0.02);                 // same 1% class as the cross-test, with headroom
+}
+
+static void test_time_scale_exact_at_low_fps() {
+    // Regression: at 30 fps the old 8-step cap was hit every frame and the backlog was
+    // discarded, so ts=1e6 silently ran at ~half speed. The sim must keep the requested
+    // time scale at ANY frame rate.
+    {
+        World w; w.spawn(Body{}); w.spawn(Body{});
+        w.timeScale = 1e6;
+        for (int i = 0; i < 30; ++i) w.advance(1.0 / 30.0);   // 1 real second at 30 fps
+        CHECK_NEAR(w.simTime, 1.0e6, 1.0);
+    }
+    {
+        World w; w.spawn(Body{}); w.spawn(Body{});
+        w.timeScale = 1.0;
+        for (int i = 0; i < 30; ++i) w.advance(1.0 / 30.0);
+        CHECK_NEAR(w.simTime, 1.0, 0.02);
+    }
+    {
+        World w; w.spawn(Body{}); w.spawn(Body{});
+        w.timeScale = 1e6;
+        for (int i = 0; i < 240; ++i) w.advance(1.0 / 240.0); // 1 real second at 240 fps
+        CHECK_NEAR(w.simTime, 1.0e6, 1.0);
+    }
 }
 
 static void test_barnes_hut_matches_direct() {
@@ -435,7 +525,10 @@ int main() {
     test_presets_sanity();
     test_scene_roundtrip();
     test_time_scale_fast_forward();
+    test_time_scale_exact_at_low_fps();
     test_scene_visual_floor();
+    test_solver_softening_is_consistent();
+    test_solver_switch_is_continuous();
     test_barnes_hut_matches_direct();
     if (g_failures) { std::printf("%d failure(s)\n", g_failures); return 1; }
     std::printf("all physics tests passed\n");

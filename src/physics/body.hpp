@@ -3,6 +3,7 @@
 #include <deque>
 #include <cstdint>
 #include <cmath>
+#include <algorithm>
 
 namespace gs {
 
@@ -36,5 +37,12 @@ struct Body {
         return std::cbrt(3.0 * mass / (4.0 * 3.14159265358979323846 * density));
     }
 };
+
+// Plummer softening for one pair (spec §4.4): ε = max(frac·(R₁+R₂), floor).
+// This is THE canonical softening used by every solver path (direct O(n²) and
+// Barnes-Hut) so that the physics cannot change when the tree kicks in at 64 bodies.
+inline double pairSoftening(const Body& a, const Body& b, double frac, double floorMeters) {
+    return std::max(frac * (a.radius() + b.radius()), floorMeters);
+}
 
 } // namespace gs
